@@ -24,6 +24,16 @@ Console.WriteLine($"{name}：{grade} 年级");
 
 **通俗理解：** 普通 class 默认更关心“是不是同一个对象”，record 更关心“对象中记录的数据是否相同”。两个分别创建的 `Student` 只要成员值相同，`==` 就认为它们相等。`with` 可以理解为“复印一份，再改几个地方”。
 
+**属性能否直接修改：** 对于 `public record Student(string Name, int Grade);` 这种位置参数形式的 record（引用类型），如果没有自行声明对应属性，编译器会自动生成 `get; init;` 属性。因此，初始化时可以赋值，但初始化结束后不能直接重新赋值；`with` 则会创建一个新对象，在新对象的初始化阶段设置属性。
+
+```csharp
+var student = new Student("小林", 3) { Grade = 4 }; // 初始化时可以赋值
+// student.Grade = 5; // 编译错误：初始化结束后不能直接赋值
+var updated = student with { Grade = 5 }; // 创建新对象，student.Grade 仍为 4
+```
+
+record 本身不强制不可变。若自行声明带有 `get; set;` 的属性，创建后就可以直接修改该属性。这里的默认 `init` 规则针对位置式 record 引用类型；C# 10 的普通位置式 `record struct` 默认生成 `get; set;` 属性，详见 10.1 节。此外，`init` 只限制属性重新赋值，不会禁止修改属性所引用的可变对象的内容。
+
 `with` 默认是**浅复制**，不会自动复制成员引用的对象：
 
 ```csharp
@@ -104,6 +114,19 @@ Console.WriteLine(GetResult(95));  // 优秀
 Console.WriteLine(GetResult(70));  // 合格
 Console.WriteLine(GetResult(120)); // 无效成绩
 ```
+
+同样的分类逻辑，在 **C# 8** 中可以用 `switch` 表达式配合 `when` 条件：
+
+```csharp
+static string GetResult(int score) => score switch
+{
+    var n when n < 0 || n > 100 => "无效成绩",
+    var n when n >= 90 => "优秀",
+    var n when n >= 60 && n < 90 => "合格",
+    _ => "不合格"
+};
+```
+
 
 **通俗理解：** 以前通常是写一串“怎样计算出 true 或 false”，模式匹配则可以直接描述“这个值应该符合什么形状或范围”。这些模式可以用在 `is`、`switch` 语句和 `switch` 表达式等位置。
 
@@ -433,6 +456,93 @@ const string Route = $"/api/{Area}";
 库作者可以定义插值处理程序，控制 `$"用户 {id}"` 如何拼接、格式化，甚至在无需记录日志时跳过插值内容的求值。调用方通常仍使用熟悉的 `$"..."` 语法。
 
 这是减少临时字符串和无效计算的机制，但前提是被调用 API 使用相应处理程序；不能推断任意日志方法都会自动跳过计算。
+
+下面是一个完整示例，可在 C# 10 + .NET 6 或更高版本中运行。日志关闭时，连插值中的 `Calculate()` 都不会执行：
+
+```csharp
+using System;
+using System.Runtime.CompilerServices;
+
+var logger = new Logger { Enabled = false };
+logger.Log($"结果是 {Calculate()}"); // 不执行 Calculate，没有输出
+
+logger.Enabled = true;
+logger.Log($"结果是 {Calculate()}"); // 输出“正在计算”和“结果是 123”
+
+static int Calculate()
+{
+    Console.WriteLine("正在计算");
+    return 123;
+}
+
+public class Logger
+{
+    public bool Enabled { get; set; }
+
+    public void Log(
+        [InterpolatedStringHandlerArgument("")]
+        LogHandler handler)
+    {
+        if (Enabled)
+            Console.WriteLine(handler.GetText());
+    }
+}
+
+[InterpolatedStringHandler]
+public ref struct LogHandler
+{
+    private DefaultInterpolatedStringHandler _builder;
+
+    public LogHandler(
+        int literalLength,
+        int formattedCount,
+        Logger logger,
+        out bool shouldAppend)
+    {
+        shouldAppend = logger.Enabled;
+        _builder = default;
+
+        if (shouldAppend)
+        {
+            _builder = new DefaultInterpolatedStringHandler(
+                literalLength, formattedCount);
+        }
+    }
+
+    public void AppendLiteral(string text)
+        => _builder.AppendLiteral(text);
+
+    public void AppendFormatted<T>(T value)
+        => _builder.AppendFormatted(value);
+
+    public string GetText()
+        => _builder.ToStringAndClear();
+}
+```
+
+`LogHandler` 决定“要不要构建字符串”，`DefaultInterpolatedStringHandler` 是 .NET 提供的现成工具，负责“怎样追加文字、格式化值并构建字符串”。普通的 `Log(string message)` 会先计算插值并生成字符串，再进入方法；本例的 `Log` 接收处理程序，让编译器能在插值求值前判断是否需要构建。
+
+- `[InterpolatedStringHandler]` 是固定特性，标记处理程序类型；`LogHandler` 这个类型名可以自定义。
+- `[InterpolatedStringHandlerArgument("")]` 中的空字符串表示把调用对象 `logger` 传给处理程序构造函数。
+- 构造函数前两个 `int` 参数依次接收固定文字长度和插值数量；本例中分别是 `4`（“结果是 ”）和 `1`。
+- 构造函数末尾的 `out bool` 是可选的条件开关。参数名 `shouldAppend` 可以自定义，但编译器按这个参数的类型和位置识别它。
+- `AppendLiteral`、`AppendFormatted` 是编译器查找的固定方法名，分别处理固定文字和插入值；`GetText()`、`_builder` 则是本例自行定义的名称。
+
+对于 `logger.Log($"结果是 {Calculate()}")`，编译器生成的逻辑可以近似理解为下面这样：
+
+```csharp
+var handler = new LogHandler(4, 1, logger, out bool shouldAppend);
+
+if (shouldAppend)
+{
+    handler.AppendLiteral("结果是 ");
+    handler.AppendFormatted(Calculate());
+}
+
+logger.Log(handler);
+```
+
+因此，`shouldAppend` 为 `false` 时，`AppendLiteral`、`Calculate()` 和 `AppendFormatted` 都不会执行；`Log` 方法本身仍会被调用，只是它检查到日志关闭后不读取字符串。如果手动调用 `handler.AppendLiteral(...)`，则不会自动获得这个条件判断。
 
 ### 10.10 record 可以封闭 ToString 的重写
 
