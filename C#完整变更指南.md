@@ -648,13 +648,62 @@ if (numbers is [var first, .. var middle, var last])
 ### 11.4 Span<char> 可以匹配常量字符串
 
 ```csharp
-ReadOnlySpan<char> verb = "POST".AsSpan();
-bool isPost = verb is "POST";
+using System;
+
+// 直接查看请求中的前四个字符，不创建子字符串
+string request = "POST /orders";
+ReadOnlySpan<char> verb = request.AsSpan(0, 4);
+ReadOnlySpan<char> expected = "POST".AsSpan();
+
+Console.WriteLine(verb == expected); // False：指向不同的内存位置
+Console.WriteLine(verb is "POST");   // True：字符内容恰好是 POST（C# 11）
+
+// C# 11 之前，比较内容可以使用 SequenceEqual
+Console.WriteLine(verb.SequenceEqual(expected)); // True
 ```
 
-`Span<char>` 和 `ReadOnlySpan<char>` 可以用字符串常量模式检查内容，不必先创建 `string`。
+`Span<char>` 和 `ReadOnlySpan<char>` 可以用字符串常量模式检查内容，不必先创建 `string`。这里的 `verb` 是原字符串中一段字符的视图，而不是单独的字符串。
 
-### 11.5 泛型数学：同一份算法用于多种数字类型
+**通俗理解：** 两个 span 使用 `==` 时，检查的是“是否指向相同的起始内存位置，并且长度相同”，不是逐个比较字符；`verb is "POST"` 则检查完整字符内容是否等于 `POST`，且区分大小写。本例中两段数据内容相同，但位置不同，所以 `==` 为 `False`，常量字符串模式为 `True`。
+
+### 11.5 接口支持静态抽象和静态虚拟成员：通过泛型调用实现类型的静态成员
+
+接口可以要求实现类型提供静态成员，并让泛型代码通过受约束的类型参数 `T` 调用这些成员。普通接口的实例成员通过对象调用，例如 `student.Work()`；这里的静态成员则通过类型参数调用，例如 `T.CreateDefault()`。
+
+**static abstract：要求实现类型提供实现。**
+
+```csharp
+using System;
+
+var student = Creator.Build<Student>();
+Console.WriteLine(student.Name); // 访客
+
+// 1. 接口要求实现类型提供静态创建方法
+public interface IHasDefault<TSelf> where TSelf : IHasDefault<TSelf>
+{
+    static abstract TSelf CreateDefault();
+}
+
+// 2. 实现类型提供静态方法，不写 override
+public class Student : IHasDefault<Student>
+{
+    public string Name { get; set; } = "";
+
+    public static Student CreateDefault()
+        => new Student { Name = "访客" };
+}
+
+// 3. 泛型代码根据接口约束调用实现类型的静态方法
+public static class Creator
+{
+    public static T Build<T>() where T : IHasDefault<T>
+        => T.CreateDefault();
+}
+```
+
+`Build<Student>()` 中的 `T` 是 `Student`，因此调用 `Student.CreateDefault()`。如果另一个类型也实现了 `IHasDefault<自身类型>`，同一份 `Build<T>()` 就能调用那个类型提供的创建方法。若具体类型没有提供要求的静态方法，会编译报错。
+
+### 11.6 泛型数学：同一份算法用于多种数字类型
 
 ```csharp
 using System.Numerics;
@@ -673,22 +722,17 @@ Console.WriteLine(Sum(new[] { 1.5m, 2.5m })); // decimal
 
 过去普通泛型约束无法表达“T 支持加法”，往往要写多个重载。现在语言与 .NET 7 数学接口配合，可以在泛型中使用数字运算。`INumber<T>` 是类库接口，不是 C# 关键字；结果仍遵循具体数字类型的精度和溢出规则。
 
-### 11.6 接口静态抽象/静态虚拟成员：描述类型本身的能力
+**原理：11.5 是语言机制，泛型数学是它的重要应用。** 数学接口通过静态抽象成员约定“零”“加法”等能力；泛型代码有了接口约束，就可以通过 `T` 使用这些能力。下面是用于解释原理的简化接口，并不是 `INumber<T>` 的实际定义：
 
 ```csharp
-public interface IHasDefault<TSelf> where TSelf : IHasDefault<TSelf>
+public interface IAddable<TSelf> where TSelf : IAddable<TSelf>
 {
-    static abstract TSelf CreateDefault();
-}
-
-public static class Creator
-{
-    public static T Build<T>() where T : IHasDefault<T>
-        => T.CreateDefault();
+    static abstract TSelf Zero { get; }
+    static abstract TSelf operator +(TSelf left, TSelf right);
 }
 ```
 
-接口现在能要求实现类型提供静态方法、属性和运算符等；`static virtual` 可以提供默认实现。通过受约束的类型参数 `T` 调用它们，是泛型数学的重要基础，不是通过接口对象调用静态方法。
+`Zero` 要求实现类型提供表示零的静态属性；`operator +` 要求实现类型提供加法运算符。实际的 `INumber<T>` 通过一组数学接口提供相应约定，`int`、`double`、`decimal` 等类型已经实现了它们。因此，`where T : INumber<T>` 让编译器知道上面的 `T.Zero` 和 `total + value` 是合法的，而不是仅凭成员名字猜测 `T` 是否支持这些操作。
 
 ### 11.7 泛型特性：特性可以直接接收类型参数
 
@@ -737,6 +781,17 @@ public struct Measurement
 
 ### 11.10 nameof 的作用域扩大到参数相关特性
 
+C# 11 之前，这个位置需要手写参数名字符串：
+
+```csharp
+using System.Diagnostics.CodeAnalysis;
+
+[return: NotNullIfNotNull("text")]
+static string? Normalize(string? text) => text?.Trim();
+```
+
+C# 11 起，可以直接用 `nameof(text)` 引用参数名：
+
 ```csharp
 using System.Diagnostics.CodeAnalysis;
 
@@ -746,7 +801,13 @@ static string? Normalize(string? text) => text?.Trim();
 
 方法、局部函数或 Lambda 的相关特性中，可以在 `nameof` 内引用相应参数等名称。这样参数重命名时，特性表达的关联更容易保持一致。
 
+以上是同一方法的两种写法，应分别使用。`nameof(text)` 生成的是字符串 `"text"`，不是参数的运行时值；区别在于它是编译器识别的名称引用，IDE 重命名参数时可以同步更新，避免手写字符串被漏改。
+
 ### 11.11 ref 字段、scoped 和 UnscopedRef：更明确地控制引用寿命
+
+这组功能解决的是：引用直接指向一块存储位置，怎样保证使用它时，那块存储仍然有效。这里主要讨论 `ref`、`Span<T>` 这类引用，而不是普通的类变量。
+
+**1. ref 字段：保存变量的位置，而不是复制它的值。** C# 11 允许在 `ref struct` 中声明 `ref` 字段：
 
 ```csharp
 public ref struct IntSlot
@@ -758,9 +819,73 @@ public ref struct IntSlot
 }
 ```
 
-`ref struct` 可以保存 `ref` 字段，引用外部变量的存储位置。配套的 `scoped` 限制引用或引用类值向外逃逸，例如 `void Inspect(scoped ReadOnlySpan<int> data)`；编译器会阻止超出安全寿命的使用。
+使用时，修改字段引用的位置，就是修改原变量：
 
-`[UnscopedRef]` 则用于适用声明，调整原有隐式 scoped 规则。`ref readonly` 字段与 `readonly ref` 字段分别关注“能否通过引用改值”和“能否改为引用另一位置”，不要把它们当成同一个限制。这组变化主要服务底层库作者。
+```csharp
+// 方法内调用
+int number = 10;
+var slot = new IntSlot(ref number);
+slot.Set(20);
+Console.WriteLine(number); // 20
+```
+
+注意，`_value = ref value;` 是让字段引用另一个存储位置；`_value = value;` 则是向字段当前引用的位置写入数值。前者设置引用，后者修改值。
+
+**2. scoped：限制引用向外传递。** 方法可以使用参数，但不能把这个参数携带的引用返回出去：
+
+```csharp
+static void Inspect(scoped ReadOnlySpan<int> data)
+{
+    Console.WriteLine(data.Length); // 可以读取和使用
+}
+
+// 编译错误的示例：不能让这个引用逃出方法
+// static ReadOnlySpan<int> Escape(scoped ReadOnlySpan<int> data)
+// {
+//     return data;
+// }
+```
+
+`scoped` 不禁止读取或计算，而是限制引用流向更长寿命的位置。它不是运行时销毁变量的指令，而是编译器检查引用安全范围时使用的约束。
+
+**3. UnscopedRef：调整某些默认的引用限制。** 普通结构体的实例方法默认不能返回自身普通字段的引用，下面的写法会编译失败：
+
+```csharp
+public struct Counter
+{
+    private int _value;
+
+    // public ref int GetValue() => ref _value; // 编译错误
+}
+```
+
+在这个方法上添加 `[UnscopedRef]` 后，可以声明这种引用返回。下面是一个独立的完整示例，可在 C# 11 + .NET 7 或更高版本中运行：
+
+```csharp
+using System;
+using System.Diagnostics.CodeAnalysis;
+
+var counter = new Counter();
+ref int value = ref counter.GetValue();
+
+value = 10; // 修改 counter 的 _value
+Console.WriteLine(counter.GetValueCopy()); // 10
+
+public struct Counter
+{
+    private int _value;
+
+    [UnscopedRef]
+    public ref int GetValue() => ref _value;
+
+    // 只返回值的副本，不需要 UnscopedRef
+    public int GetValueCopy() => _value;
+}
+```
+
+这里的特性放宽了结构体实例方法隐式 `this` 的引用范围限制，但不会延长变量的实际寿命，也不会关闭引用安全检查。返回的引用仍不能超出 `counter` 存储位置的安全寿命。它只适用于语言允许的声明位置，不能把它当成任意返回引用的通行证。
+
+**通俗理解：** `ref` 字段保存引用；`scoped` 限制引用外传；`UnscopedRef` 调整特定声明的默认限制。见[引用安全说明](https://learn.microsoft.com/en-us/dotnet/csharp/write-safe-efficient-code)和[引用范围规则](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/variables)。
 
 <a id="csharp12"></a>
 ## C# 12：构造对象和集合更简洁
